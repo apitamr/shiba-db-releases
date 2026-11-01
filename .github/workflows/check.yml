@@ -1,7 +1,7 @@
 # Checks Kagi's private source on this public repository's free minutes:
 # `make check`, the keyring tests and a build without DuckDB, and the
-# server drivers' integration tests against containers (CockroachDB's through
-# the PostgreSQL driver's tests, Vitess's through MySQL's).
+# server drivers' integration tests against containers (CockroachDB's and
+# CrateDB's through the PostgreSQL driver's tests, Vitess's through MySQL's).
 #
 # Started only by the owner: `make ci` in the source (a commit already
 # pushed), a manual run here, or nightly on main, which adds Windows and the
@@ -129,6 +129,7 @@ jobs:
       KAGI_TEST_SQLSERVER: sqlserver://sa:Kagi_db_2026@127.0.0.1:14330?trustServerCertificate=true
       KAGI_TEST_COCKROACH: host=127.0.0.1 port=26257 user=root dbname=kagi_test
       KAGI_TEST_VITESS: mysql://root@127.0.0.1:33577
+      KAGI_TEST_CRATE: postgres://crate@127.0.0.1:55440/doc
     steps:
       - uses: actions/checkout@v7
         with:
@@ -158,6 +159,7 @@ jobs:
           docker run -d --name mssql -p 14330:1433 -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD=Kagi_db_2026 mcr.microsoft.com/mssql/server:2022-latest
           docker run -d --name clickhouse -p 18123:8123 -e CLICKHOUSE_USER=app -e CLICKHOUSE_PASSWORD=secret clickhouse/clickhouse-server:25.8
           docker run -d --name kagi-crdb -p 26257:26257 cockroachdb/cockroach:v25.2.4 start-single-node --insecure
+          docker run -d --name kagi-crate -p 55440:5432 crate:5.10 -Cdiscovery.type=single-node
           docker run -d --name kagi-vitess -p 33577:33577 vitess/vttestserver:mysql80 /vt/bin/vttestserver \
             --port=33574 --keyspaces=shop --num_shards=1 --mysql_bind_host=0.0.0.0
       - name: Linux packages
@@ -187,7 +189,7 @@ jobs:
           mkdir -p /tmp/mysql-certs && cp /tmp/mysql-all/*.pem /tmp/mysql-certs/
       # CockroachDB's tests run on a database of their own; Vitess takes
       # its time to start its tablets.
-      - name: Wait for CockroachDB and Vitess
+      - name: Wait for CockroachDB, Vitess and CrateDB
         run: |
           for _ in $(seq 60); do
             docker exec kagi-crdb cockroach sql --insecure -e 'CREATE DATABASE IF NOT EXISTS kagi_test' \
@@ -198,16 +200,22 @@ jobs:
             docker exec kagi-vitess mysql -h127.0.0.1 -P33577 -e 'select 1' >/dev/null 2>&1 && break
             sleep 2
           done
+          for _ in $(seq 60); do
+            docker exec kagi-crate crash -c 'SELECT 1' >/dev/null 2>&1 && break
+            sleep 2
+          done
       # The TLS test needs a PostgreSQL server with its own certificate; the
       # socket tests run in their own step.
       - run: >-
           cargo test -p kagi-drivers postgres -- --ignored
           --skip tls_modes_encrypt_and_check_the_certificate --skip a_socket_connects
-      # SingleStore's image wants a license key, so its tests (in the MySQL
-      # driver, KAGI_TEST_SINGLESTORE) run by hand only.
+      # SingleStore's image wants a license key, and Apache Doris needs a
+      # frontend and a backend too heavy for the runner, so their tests (in
+      # the MySQL driver, KAGI_TEST_SINGLESTORE and KAGI_TEST_DORIS) run by
+      # hand only.
       - run: >-
           cargo test -p kagi-drivers mysql -- --ignored
-          --skip a_socket_in_the_url --skip singlestore_tests
+          --skip a_socket_in_the_url --skip singlestore_tests --skip doris_tests
       - run: cargo test -p kagi-drivers mongo -- --ignored --test-threads=1
       - run: cargo test -p kagi-drivers redis -- --ignored
       - run: cargo test -p kagi-drivers clickhouse -- --ignored
